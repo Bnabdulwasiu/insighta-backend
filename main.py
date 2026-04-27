@@ -7,10 +7,11 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 import asyncio
 from database import engine, Base, AsyncSessionLocal
-from schemas import *
+from schemas import ProfileSchema, CreateProfileRequest, ProfileListResponse
 from models import Profile
 from utils import (get_age_group, profile_to_dict,
                     get_country_name, seed_database, parse_query, is_valid_uuid)
+from typing import Optional
 
 
 # Database Setup
