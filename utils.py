@@ -1,7 +1,7 @@
 from fastapi import HTTPException
 from models import Profile
 import pycountry
-from main import *
+from database import AsyncSessionLocal
 import json
 from sqlalchemy.dialects.postgresql import insert
 import re

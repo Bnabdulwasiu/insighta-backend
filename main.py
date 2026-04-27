@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 import asyncio
-from database import *
+from database import engine, Base, AsyncSessionLocal
 from schemas import *
 from models import Profile
 from utils import (get_age_group, profile_to_dict,
