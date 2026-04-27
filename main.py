@@ -12,7 +12,7 @@ from models import Profile
 from utils import (get_age_group, profile_to_dict,
                     get_country_name, seed_database, parse_query, is_valid_uuid)
 from typing import Optional
-
+from routers.auth import router as auth_router
 
 # Database Setup
 from sqlalchemy import select, func
@@ -43,7 +43,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
-
+app.include_router(auth_router)
 
 app.add_middleware(
     CORSMiddleware,

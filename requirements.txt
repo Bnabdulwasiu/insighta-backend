@@ -54,3 +54,7 @@ websockets==16.0
 ruff
 pytest
 pytest-asyncio
+python-jose[cryptography]
+passlib
+httpx
+slowapi

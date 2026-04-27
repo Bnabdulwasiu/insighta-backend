@@ -27,3 +27,6 @@ class ProfileListResponse(BaseModel):
 
 class CreateProfileRequest(BaseModel):
     name: str
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
