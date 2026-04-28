@@ -1,4 +1,5 @@
 from fastapi import HTTPException
+from httpx import request
 from models import Profile
 import pycountry
 from database import AsyncSessionLocal
@@ -184,3 +185,10 @@ def is_valid_uuid(value: str) -> bool:
         return True
     except ValueError:
         return False
+    
+
+def build_url(p: int) -> str:
+    params = request.query_params._dict.copy()
+    params["page"] = str(p)
+    query_string = "&".join(f"{k}={v}" for k, v in params.items())
+    return f"{request.url.path}?{query_string}"

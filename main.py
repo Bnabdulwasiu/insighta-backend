@@ -1,6 +1,7 @@
 from fastapi import (FastAPI, HTTPException, Request,
-                      status, Response, Query)
+                      status, Response, Query, Depends)
 import httpx
+from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -9,10 +10,19 @@ import asyncio
 from database import engine, Base, AsyncSessionLocal
 from schemas import ProfileSchema, CreateProfileRequest, ProfileListResponse
 from models import Profile
+from auth import get_current_user, require_admin
+from models import User
 from utils import (get_age_group, profile_to_dict,
-                    get_country_name, seed_database, parse_query, is_valid_uuid)
+                    get_country_name, seed_database,
+                    parse_query, is_valid_uuid, build_url)
 from typing import Optional
+import time
+import logging
 from routers.auth import router as auth_router
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+import math
 
 # Database Setup
 from sqlalchemy import select, func
@@ -73,21 +83,6 @@ async def custom_http_exception_handler(request: Request, exc: HTTPException):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    # first_error = exc.errors()[0]
-    # field = first_error["loc"][-1]
-
-    # if field == "name":
-    #     message = "name is not a string"
-    # else:
-    #     message = first_error["msg"]
-
-    # return JSONResponse(
-    #     status_code=422,
-    #     content={
-    #         "status": "error",
-    #         "message": message
-    #     }
-    # )
         return JSONResponse(
         status_code=422,
         content={
@@ -96,9 +91,53 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         }
     )
 
+# API versioning
+class APIVersionMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path.startswith("/api/"):
+            version = request.headers.get("X-API-Version")
+            if not version:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "status": "error",
+                        "message": "API version header required"
+                    }
+                )
+        return await call_next(request)
+
+app.add_middleware(APIVersionMiddleware)
+
+# Logging middleware
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class LoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        start = time.time()
+        response = await call_next(request)
+        duration = round((time.time() - start) * 1000, 2)
+        logger.info(
+            f"{request.method} {request.url.path} "
+            f"→ {response.status_code} ({duration}ms)"
+        )
+        return response
+
+app.add_middleware(LoggingMiddleware)
+
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
 # Post function
 @app.post("/api/profiles", response_model=ProfileSchema, status_code=201)
-async def create_profile(body: CreateProfileRequest):
+@limiter.limit("60/minute")
+async def create_profile(request: Request,
+                         body: CreateProfileRequest,
+                         current_user: User = Depends(require_admin)
+):
     name =  body.name.strip().lower()
     if not name:
         raise HTTPException(status_code=400, detail={
@@ -186,7 +225,9 @@ async def create_profile(body: CreateProfileRequest):
 
 
 @app.get("/api/profiles" , response_model=ProfileListResponse)
+@limiter.limit("60/minute")
 async def get_all_profiles(
+    request: Request,
     gender: Optional[str] = None,
     country_id: Optional[str] = None,
     age_group: Optional[str] = None,
@@ -199,7 +240,8 @@ async def get_all_profiles(
     order: str = Query(default="asc", pattern="^(asc|desc)$"),  
     # Pagination
     page: int = Query(default=1, ge=1),
-    limit: int = Query(default=10, ge=1, le=50)
+    limit: int = Query(default=10, ge=1, le=50),
+    current_user: User = Depends(get_current_user),
 ):
     SORTABLE_FIELDS = {
         "age": Profile.age,
@@ -246,11 +288,19 @@ async def get_all_profiles(
         result = await session.execute(query)
         profiles = result.scalars().all()
 
+        total_pages = math.ciel(total / limit)
+
         return {
             "status": "success",
             "page": page,
             "limit": limit,
             "total": total,
+            "total_pages": total_pages,
+            "links": {
+                "self": build_url(page),
+                "next": build_url(page + 1) if page < total_pages else None,
+                "prev": build_url(page - 1) if page > 1 else None,
+            },
             "data": [profile_to_dict(p) for p in profiles]
         }
 
@@ -269,10 +319,13 @@ async def parse_profile_query(q: str = Query(..., min_length=1)):
 
 # Natural language search endpoint
 @app.get("/api/profiles/search")
+@limiter.limit("60/minute")
 async def search_profiles(
+    request: Request,
     q: str = Query(..., min_length=1),
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=10, ge=1, le=50),
+    current_user: User = Depends(get_current_user),
 ):
     filters = parse_query(q)
     if not filters:
@@ -307,6 +360,7 @@ async def search_profiles(
 
         result = await session.execute(query)
         profiles = result.scalars().all()
+        total_pages = math.ceil(total / limit)
 
         return {
             "status": "success",
@@ -315,11 +369,22 @@ async def search_profiles(
             "page": page,
             "limit": limit,
             "total": total,
+            "total_pages": total_pages,
+            "links": {
+                "self": build_url(page),
+                "next": build_url(page + 1) if page < total_pages else None,
+                "prev": build_url(page - 1) if page > 1 else None,
+            },
             "data": [profile_to_dict(p) for p in profiles]
         }
 
 @app.get("/api/profiles/{profile_id}")
-async def get_profile(profile_id: str):
+@limiter.limit("60/minute")
+async def get_profile(
+    reques: Request,
+    profile_id: str,
+    current_user: User = Depends(get_current_user)
+):
     if not is_valid_uuid(profile_id):
         raise HTTPException(status_code=422, detail={
             "status": "error",
@@ -339,7 +404,12 @@ async def get_profile(profile_id: str):
 
     
 @app.delete("/api/profiles/{profile_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_profile(profile_id: str):
+@limiter.limit("60/minute")
+async def delete_profile(
+    request:Request,
+    profile_id: str,
+    current_user: User = Depends(require_admin)
+):
     if not is_valid_uuid(profile_id):
         raise HTTPException(status_code=422, detail={
             "status": "error",

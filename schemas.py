@@ -18,11 +18,19 @@ class ProfileSchema(BaseModel):
     class Config:
         from_attributes = True
 
+
+class PaginationLinks(BaseModel):
+    self: str
+    next: Optional[str]
+    prev: Optional[str]
+
 class ProfileListResponse(BaseModel):
     status: str = "success"
     page: int
     limit: int
     total: int
+    total_pages: int
+    links: PaginationLinks
     data: List[ProfileSchema]
 
 class CreateProfileRequest(BaseModel):
