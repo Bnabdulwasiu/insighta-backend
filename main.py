@@ -1,3 +1,4 @@
+import os
 from fastapi import (FastAPI, HTTPException, Request,
                       status, Response, Query, Depends)
 import httpx
@@ -14,15 +15,18 @@ from auth import get_current_user, require_admin
 from models import User
 from utils import (get_age_group, profile_to_dict,
                     get_country_name, seed_database,
-                    parse_query, is_valid_uuid, build_url)
+                    parse_query, is_valid_uuid, build_url) 
 from typing import Optional
 import time
 import logging
 from routers.auth import router as auth_router
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
+from core.limiter import limiter
+# from slowapi.errors import RateLimitExceeded
 import math
+import csv
+import io
+from fastapi.responses import StreamingResponse
+from datetime import datetime as dt
 
 # Database Setup
 from sqlalchemy import select, func
@@ -93,20 +97,21 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 # API versioning
 class APIVersionMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
+    async def dispatch(self, request, call_next):
         if request.url.path.startswith("/api/"):
-            version = request.headers.get("X-API-Version")
-            if not version:
-                return JSONResponse(
-                    status_code=400,
-                    content={
-                        "status": "error",
-                        "message": "API version header required"
-                    }
-                )
+            if os.getenv("ENV") == "production":
+                version = request.headers.get("X-API-Version")
+                if not version:
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "status": "error",
+                            "message": "API version header required"
+                        }
+                    )
         return await call_next(request)
 
-app.add_middleware(APIVersionMiddleware)
+
 
 # Logging middleware
 logging.basicConfig(level=logging.INFO)
@@ -124,11 +129,10 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         return response
 
 app.add_middleware(LoggingMiddleware)
+app.add_middleware(APIVersionMiddleware)
 
-
-limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 # Post function
@@ -288,7 +292,7 @@ async def get_all_profiles(
         result = await session.execute(query)
         profiles = result.scalars().all()
 
-        total_pages = math.ciel(total / limit)
+        total_pages = math.ceil(total / limit)
 
         return {
             "status": "success",
@@ -297,9 +301,9 @@ async def get_all_profiles(
             "total": total,
             "total_pages": total_pages,
             "links": {
-                "self": build_url(page),
-                "next": build_url(page + 1) if page < total_pages else None,
-                "prev": build_url(page - 1) if page > 1 else None,
+                "self": build_url(request, page),
+                "next": build_url(request, page + 1) if page < total_pages else None,
+                "prev": build_url(request, page - 1) if page > 1 else None,
             },
             "data": [profile_to_dict(p) for p in profiles]
         }
@@ -371,17 +375,92 @@ async def search_profiles(
             "total": total,
             "total_pages": total_pages,
             "links": {
-                "self": build_url(page),
-                "next": build_url(page + 1) if page < total_pages else None,
-                "prev": build_url(page - 1) if page > 1 else None,
+                "self": build_url(request, page),
+                "next": build_url(request, page + 1) if page < total_pages else None,
+                "prev": build_url(request, page - 1) if page > 1 else None,
             },
             "data": [profile_to_dict(p) for p in profiles]
         }
+    
+
+@app.get("/api/profiles/export")
+@limiter.limit("60/minute")
+async def export_profiles(
+    request: Request,
+    format: str = Query(default="csv"),
+    gender: Optional[str] = None,
+    country_id: Optional[str] = None,
+    age_group: Optional[str] = None,
+    min_age: Optional[int] = None,
+    max_age: Optional[int] = None,
+    sort_by: Optional[str] = None,
+    order: str = Query(default="asc", pattern="^(asc|desc)$"),
+    current_user: User = Depends(get_current_user),
+):
+    if format != "csv":
+        raise HTTPException(status_code=400, detail={
+            "status": "error",
+            "message": "Only format=csv is supported"
+        })
+
+    SORTABLE_FIELDS = {
+        "age": Profile.age,
+        "created_at": Profile.created_at,
+        "gender_probability": Profile.gender_probability,
+    }
+
+    async with AsyncSessionLocal() as session:
+        query = select(Profile)
+
+        if gender:
+            query = query.where(Profile.gender == gender.lower())
+        if country_id:
+            query = query.where(Profile.country_id == country_id.upper())
+        if age_group:
+            query = query.where(Profile.age_group == age_group.lower())
+        if min_age is not None:
+            query = query.where(Profile.age >= min_age)
+        if max_age is not None:
+            query = query.where(Profile.age <= max_age)
+        if sort_by and sort_by in SORTABLE_FIELDS:
+            col = SORTABLE_FIELDS[sort_by]
+            query = query.order_by(col.desc() if order == "desc" else col.asc())
+
+        result = await session.execute(query)
+        profiles = result.scalars().all()
+
+    # Build CSV in memory
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    writer.writerow([
+        "id", "name", "gender", "gender_probability",
+        "age", "age_group", "country_id", "country_name",
+        "country_probability", "created_at"
+    ])
+    for p in profiles:
+        writer.writerow([
+            str(p.id), p.name, p.gender, p.gender_probability,
+            p.age, p.age_group, p.country_id, p.country_name,
+            p.country_probability,
+            p.created_at.isoformat() if p.created_at else ""
+        ])
+
+    output.seek(0)
+    timestamp = dt.now().strftime("%Y%m%d_%H%M%S")
+
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename=profiles_{timestamp}.csv"
+        }
+    )
 
 @app.get("/api/profiles/{profile_id}")
 @limiter.limit("60/minute")
 async def get_profile(
-    reques: Request,
+    request: Request,
     profile_id: str,
     current_user: User = Depends(get_current_user)
 ):

@@ -58,3 +58,4 @@ python-jose[cryptography]
 passlib
 httpx
 slowapi
+limits

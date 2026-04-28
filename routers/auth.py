@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from datetime import datetime, timezone
-from main import limiter
+from core.limiter import limiter
 from database import AsyncSessionLocal
 from models import User, RefreshToken
 from auth import (
@@ -105,7 +105,7 @@ async def github_callback(code: str, state: str, request: Request):
 
 
 @router.post("/refresh")
-async def refresh_token(body: RefreshRequest):
+async def refresh_token(request: Request, body: RefreshRequest):
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(RefreshToken).where(RefreshToken.token == body.refresh_token)
@@ -153,7 +153,7 @@ async def refresh_token(body: RefreshRequest):
 
 
 @router.post("/logout")
-async def logout(current_user: User = Depends(get_current_user), body: RefreshRequest = None):
+async def logout(request: Request, current_user: User = Depends(get_current_user), body: RefreshRequest = None):
     if body and body.refresh_token:
         async with AsyncSessionLocal() as session:
             result = await session.execute(
@@ -168,7 +168,7 @@ async def logout(current_user: User = Depends(get_current_user), body: RefreshRe
 
 
 @router.get("/me")
-async def get_me(current_user: User = Depends(get_current_user)):
+async def get_me(request: Request, current_user: User = Depends(get_current_user)):
     return {
         "status": "success",
         "data": {

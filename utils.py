@@ -187,8 +187,8 @@ def is_valid_uuid(value: str) -> bool:
         return False
     
 
-def build_url(p: int) -> str:
-    params = request.query_params._dict.copy()
+def build_url(request, p: int) -> str:
+    params = dict(request.query_params)
     params["page"] = str(p)
     query_string = "&".join(f"{k}={v}" for k, v in params.items())
     return f"{request.url.path}?{query_string}"
