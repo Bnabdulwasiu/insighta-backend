@@ -1,5 +1,4 @@
 from fastapi import HTTPException
-from httpx import request
 from models import Profile
 import pycountry
 from database import AsyncSessionLocal
