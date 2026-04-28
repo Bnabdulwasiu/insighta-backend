@@ -1,4 +1,5 @@
-from sqlalchemy import Column, String, Float, Integer, DateTime
+from sqlalchemy import (Column, String, Float, Integer,
+                         DateTime, Boolean)
 import uuid6
 from datetime import datetime, timezone
 from database import Base
@@ -16,3 +17,26 @@ class Profile(Base):
     country_name = Column(String, nullable=True)
     country_probability = Column(Float, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class User(Base):
+    __tablename__ = "users"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid6.uuid7)
+    github_id = Column(String, unique=True, nullable=False)
+    username = Column(String, nullable=False)
+    email = Column(String, nullable=True)
+    avatar_url = Column(String, nullable=True)
+    role = Column(String, default="analyst")          # "admin" or "analyst"
+    is_active = Column(Boolean, default=True)
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class RefreshToken(Base):
+    __tablename__ = "refresh_tokens"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid6.uuid7)
+    user_id = Column(UUID(as_uuid=True), nullable=False)
+    token = Column(String, unique=True, nullable=False)
+    is_revoked = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    expires_at = Column(DateTime(timezone=True), nullable=False)
