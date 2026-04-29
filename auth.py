@@ -1,7 +1,8 @@
 import os
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 from jose import JWTError, jwt
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import select
 from database import AsyncSessionLocal
@@ -13,7 +14,8 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 3
 REFRESH_TOKEN_EXPIRE_MINUTES = 5
 
-bearer_scheme = HTTPBearer()
+# auto_error=False so missing Authorization header doesn't 403 — we fall back to cookie
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def create_access_token(user_id: str, role: str) -> str:
@@ -44,9 +46,22 @@ async def save_refresh_token(user_id: str, token: str):
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
 ) -> User:
-    token = credentials.credentials
+    # 1. Try Authorization: Bearer <token> header (CLI / manual token flow)
+    # 2. Fall back to access_token HTTP-only cookie (web OAuth flow)
+    if credentials:
+        token = credentials.credentials
+    else:
+        token = request.cookies.get("access_token")
+
+    if not token:
+        raise HTTPException(status_code=401, detail={
+            "status": "error",
+            "message": "Not authenticated"
+        })
+
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
         if payload.get("type") != "access":

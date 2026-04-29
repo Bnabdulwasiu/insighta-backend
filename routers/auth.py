@@ -299,8 +299,8 @@ async def web_github_callback(code: str, state: str, request: Request):
     refresh_token = create_refresh_token()
     await save_refresh_token(str(user.id), refresh_token)
 
-    # Set tokens in HTTP-only cookies
-    response = RedirectResponse(url=f"{FRONTEND_URL}/dashboard.html")
+    # Set tokens in HTTP-only cookies — redirect to SPA root, React Router handles the rest
+    response = RedirectResponse(url=f"{FRONTEND_URL}/")
     response.set_cookie(
         key="access_token",
         value=access_token,
@@ -391,39 +391,15 @@ async def web_logout(request: Request):
 
 
 @router.get("/web/me")
-async def web_me(request: Request):
-    token = request.cookies.get("access_token")
-    if not token:
-        raise HTTPException(status_code=401, detail={
-            "status": "error", "message": "Not authenticated"
-        })
-
-    from auth import JWT_SECRET, ALGORITHM
-    from jose import JWTError, jwt
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
-        user_id = payload.get("sub")
-    except JWTError:
-        raise HTTPException(status_code=401, detail={
-            "status": "error", "message": "Invalid or expired token"
-        })
-
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(select(User).where(User.id == user_id))
-        user = result.scalar_one_or_none()
-
-    if not user:
-        raise HTTPException(status_code=401, detail={
-            "status": "error", "message": "User not found"
-        })
-
+async def web_me(current_user: User = Depends(get_current_user)):
     return {
         "status": "success",
         "data": {
-            "id": str(user.id),
-            "username": user.username,
-            "email": user.email,
-            "role": user.role,
-            "avatar_url": user.avatar_url,
+            "id": str(current_user.id),
+            "username": current_user.username,
+            "email": current_user.email,
+            "role": current_user.role,
+            "avatar_url": current_user.avatar_url,
+            "last_login_at": current_user.last_login_at.isoformat() if current_user.last_login_at else None,
         }
     }

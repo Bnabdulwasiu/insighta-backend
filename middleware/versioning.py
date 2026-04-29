@@ -7,6 +7,9 @@ from fastapi.responses import JSONResponse
 # API versioning
 class APIVersionMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        # Always pass through CORS preflight requests
+        if request.method == "OPTIONS":
+            return await call_next(request)
         if request.url.path.startswith("/api/"):
             if os.getenv("ENV") == "production":
                 version = request.headers.get("X-API-Version")
