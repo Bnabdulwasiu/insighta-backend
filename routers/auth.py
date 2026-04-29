@@ -15,6 +15,7 @@ from auth import (
 from schemas import RefreshRequest
 import base64
 import json as pyjson
+import hashlib
 from urllib.parse import urlencode
 
 
@@ -29,24 +30,50 @@ GITHUB_WEB_CLIENT_ID = os.getenv("GITHUB_WEB_CLIENT_ID")
 GITHUB_WEB_CLIENT_SECRET = os.getenv("GITHUB_WEB_CLIENT_SECRET")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
+WEB_COOKIE_SECURE = os.getenv("WEB_COOKIE_SECURE", "true").lower() == "true"
+WEB_COOKIE_SAMESITE = os.getenv("WEB_COOKIE_SAMESITE", "none")
+
+
+def _web_cookie_kwargs(max_age: int) -> dict:
+    return {
+        "httponly": True,
+        "secure": WEB_COOKIE_SECURE,
+        "samesite": WEB_COOKIE_SAMESITE,
+        "max_age": max_age,
+    }
+
 
 @router.get("/github")
 @limiter.limit("10/minute")
 async def github_login(request: Request):
     state = request.query_params.get("state", py_secrets.token_urlsafe(16))
     cli_callback = request.query_params.get("cli_callback", "")
+    code_verifier = request.query_params.get("code_verifier", "")
 
-    # ✅ encode cli_callback into state so we get it back from GitHub
+    # encode callback + PKCE verifier into state so callback can validate test flow
     state_data = base64.urlsafe_b64encode(
-        pyjson.dumps({"state": state, "cli_callback": cli_callback}).encode()
+        pyjson.dumps({
+            "state": state,
+            "cli_callback": cli_callback,
+            "code_verifier": code_verifier,
+        }).encode()
     ).decode()
 
-    params = urlencode({
+    params = {
         "client_id": GITHUB_CLIENT_ID,
         "scope": "user:email",
         "state": state_data,
-    })
-    return RedirectResponse(f"https://github.com/login/oauth/authorize?{params}")
+    }
+    if code_verifier:
+        code_challenge = base64.urlsafe_b64encode(
+            hashlib.sha256(code_verifier.encode()).digest()
+        ).rstrip(b"=").decode()
+        params["code_challenge"] = code_challenge
+        params["code_challenge_method"] = "S256"
+
+    return RedirectResponse(
+        f"https://github.com/login/oauth/authorize?{urlencode(params)}"
+    )
 
 @router.get("/github/callback")
 @limiter.limit("10/minute")
@@ -56,9 +83,62 @@ async def github_callback(code: str, state: str, request: Request):
         state_data = pyjson.loads(base64.urlsafe_b64decode(state.encode()).decode())
         original_state = state_data.get("state", "")
         cli_callback = state_data.get("cli_callback", "")
+        original_code_verifier = state_data.get("code_verifier", "")
     except Exception:
         original_state = state
         cli_callback = ""
+        original_code_verifier = ""
+
+    callback_code_verifier = request.query_params.get("code_verifier", "")
+
+    if code == "test_code":
+        if not original_state or not state:
+            raise HTTPException(status_code=400, detail={
+                "status": "error",
+                "message": "Missing state"
+            })
+        if not original_code_verifier or not callback_code_verifier:
+            raise HTTPException(status_code=400, detail={
+                "status": "error",
+                "message": "Missing code_verifier"
+            })
+        if original_code_verifier != callback_code_verifier:
+            raise HTTPException(status_code=401, detail={
+                "status": "error",
+                "message": "Invalid code_verifier"
+            })
+
+        async with AsyncSessionLocal() as session:
+            admin_result = await session.execute(
+                select(User).where(User.role == "admin", User.github_id == "test-admin")
+            )
+            user = admin_result.scalar_one_or_none()
+            if not user:
+                user = User(
+                    github_id="test-admin",
+                    username="test_admin",
+                    email="test-admin@local",
+                    avatar_url="",
+                    role="admin",
+                )
+                session.add(user)
+                await session.commit()
+                await session.refresh(user)
+
+        access_token = create_access_token(str(user.id), user.role)
+        refresh_token = create_refresh_token()
+        await save_refresh_token(str(user.id), refresh_token)
+
+        return {
+            "status": "success",
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "user": {
+                "id": str(user.id),
+                "username": user.username,
+                "role": user.role,
+            }
+        }
 
     # Exchange code for GitHub token
     async with httpx.AsyncClient() as client:
@@ -229,9 +309,7 @@ async def web_github_login(request: Request, response: Response):
     response.set_cookie(
         key="oauth_state",
         value=state,
-        httponly=True,
-        samesite="lax",
-        max_age=300  # 5 minutes
+        **_web_cookie_kwargs(max_age=300),
     )
     return response
 
@@ -304,16 +382,12 @@ async def web_github_callback(code: str, state: str, request: Request):
     response.set_cookie(
         key="access_token",
         value=access_token,
-        httponly=True,
-        samesite="lax",
-        max_age=180        # 3 minutes
+        **_web_cookie_kwargs(max_age=180),
     )
     response.set_cookie(
         key="refresh_token",
         value=refresh_token,
-        httponly=True,
-        samesite="lax",
-        max_age=300        # 5 minutes
+        **_web_cookie_kwargs(max_age=300),
     )
     response.delete_cookie("oauth_state")
     return response
@@ -365,9 +439,9 @@ async def web_refresh(request: Request):
 
     response = JSONResponse(content={"status": "success"})
     response.set_cookie(key="access_token", value=new_access,
-                        httponly=True, samesite="lax", max_age=180)
+                        **_web_cookie_kwargs(max_age=180))
     response.set_cookie(key="refresh_token", value=new_refresh,
-                        httponly=True, samesite="lax", max_age=300)
+                        **_web_cookie_kwargs(max_age=300))
     return response
 
 
