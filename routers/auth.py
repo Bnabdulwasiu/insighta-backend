@@ -1,8 +1,8 @@
 import os
-import secrets
+import secrets as py_secrets
 import httpx
-from fastapi import APIRouter, HTTPException, Request, Depends
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, HTTPException, Request, Depends, Response
+from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy import select
 from datetime import datetime, timezone
 from core.limiter import limiter
@@ -22,13 +22,18 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+# FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+
+GITHUB_WEB_CLIENT_ID = os.getenv("GITHUB_WEB_CLIENT_ID")
+GITHUB_WEB_CLIENT_SECRET = os.getenv("GITHUB_WEB_CLIENT_SECRET")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
 
 @router.get("/github")
 @limiter.limit("10/minute")
 async def github_login(request: Request):
-    state = request.query_params.get("state", secrets.token_urlsafe(16))
+    state = request.query_params.get("state", py_secrets.token_urlsafe(16))
     cli_callback = request.query_params.get("cli_callback", "")
 
     # ✅ encode cli_callback into state so we get it back from GitHub
@@ -206,5 +211,219 @@ async def get_me(request: Request, current_user: User = Depends(get_current_user
             "role": current_user.role,
             "avatar_url": current_user.avatar_url,
             "last_login_at": current_user.last_login_at.isoformat() if current_user.last_login_at else None
+        }
+    }
+
+# Web auth
+
+@router.get("/web/github")
+@limiter.limit("10/minute")
+async def web_github_login(request: Request, response: Response):
+    state = py_secrets.token_urlsafe(16)
+
+    # Store state in HTTP-only cookie for CSRF validation
+    response = RedirectResponse(
+        f"https://github.com/login/oauth/authorize?"
+        f"client_id={GITHUB_WEB_CLIENT_ID}&scope=user:email&state={state}"
+    )
+    response.set_cookie(
+        key="oauth_state",
+        value=state,
+        httponly=True,
+        samesite="lax",
+        max_age=300  # 5 minutes
+    )
+    return response
+
+
+@router.get("/web/github/callback")
+@limiter.limit("10/minute")
+async def web_github_callback(code: str, state: str, request: Request):
+    # CSRF check — compare state with cookie
+    cookie_state = request.cookies.get("oauth_state")
+    if not cookie_state or cookie_state != state:
+        raise HTTPException(status_code=403, detail={
+            "status": "error",
+            "message": "Invalid state parameter"
+        })
+
+    # Exchange code
+    async with httpx.AsyncClient() as client:
+        token_res = await client.post(
+            "https://github.com/login/oauth/access_token",
+            json={
+                "client_id": GITHUB_WEB_CLIENT_ID,
+                "client_secret": GITHUB_WEB_CLIENT_SECRET,
+                "code": code,
+            },
+            headers={"Accept": "application/json"}
+        )
+        token_data = token_res.json()
+
+    github_token = token_data.get("access_token")
+    if not github_token:
+        raise HTTPException(status_code=502, detail={
+            "status": "error",
+            "message": "Failed to obtain GitHub access token"
+        })
+
+    # Fetch GitHub user
+    async with httpx.AsyncClient() as client:
+        user_res = await client.get(
+            "https://api.github.com/user",
+            headers={"Authorization": f"Bearer {github_token}"}
+        )
+        github_user = user_res.json()
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(User).where(User.github_id == str(github_user["id"]))
+        )
+        user = result.scalar_one_or_none()
+
+        if not user:
+            user = User(
+                github_id=str(github_user["id"]),
+                username=github_user.get("login"),
+                email=github_user.get("email"),
+                avatar_url=github_user.get("avatar_url"),
+                role="analyst"
+            )
+            session.add(user)
+
+        user.last_login_at = datetime.now(timezone.utc)
+        await session.commit()
+        await session.refresh(user)
+
+    access_token = create_access_token(str(user.id), user.role)
+    refresh_token = create_refresh_token()
+    await save_refresh_token(str(user.id), refresh_token)
+
+    # Set tokens in HTTP-only cookies
+    response = RedirectResponse(url=f"{FRONTEND_URL}/dashboard.html")
+    response.set_cookie(
+        key="access_token",
+        value=access_token,
+        httponly=True,
+        samesite="lax",
+        max_age=180        # 3 minutes
+    )
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        samesite="lax",
+        max_age=300        # 5 minutes
+    )
+    response.delete_cookie("oauth_state")
+    return response
+
+
+@router.post("/web/refresh")
+async def web_refresh(request: Request):
+    refresh_token = request.cookies.get("refresh_token")
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail={
+            "status": "error",
+            "message": "No refresh token"
+        })
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(RefreshToken).where(RefreshToken.token == refresh_token)
+        )
+        stored = result.scalar_one_or_none()
+
+        if not stored or stored.is_revoked:
+            raise HTTPException(status_code=401, detail={
+                "status": "error",
+                "message": "Invalid refresh token"
+            })
+        if stored.expires_at < datetime.now(timezone.utc):
+            raise HTTPException(status_code=401, detail={
+                "status": "error",
+                "message": "Refresh token expired"
+            })
+
+        stored.is_revoked = True
+        await session.commit()
+
+        user_result = await session.execute(
+            select(User).where(User.id == stored.user_id)
+        )
+        user = user_result.scalar_one_or_none()
+
+    if not user or not user.is_active:
+        raise HTTPException(status_code=403, detail={
+            "status": "error",
+            "message": "User not found or deactivated"
+        })
+
+    new_access = create_access_token(str(user.id), user.role)
+    new_refresh = create_refresh_token()
+    await save_refresh_token(str(user.id), new_refresh)
+
+    response = JSONResponse(content={"status": "success"})
+    response.set_cookie(key="access_token", value=new_access,
+                        httponly=True, samesite="lax", max_age=180)
+    response.set_cookie(key="refresh_token", value=new_refresh,
+                        httponly=True, samesite="lax", max_age=300)
+    return response
+
+
+@router.post("/web/logout")
+async def web_logout(request: Request):
+    refresh_token = request.cookies.get("refresh_token")
+    if refresh_token:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(RefreshToken).where(RefreshToken.token == refresh_token)
+            )
+            stored = result.scalar_one_or_none()
+            if stored:
+                stored.is_revoked = True
+                await session.commit()
+
+    response = JSONResponse(content={"status": "success"})
+    response.delete_cookie("access_token")
+    response.delete_cookie("refresh_token")
+    return response
+
+
+@router.get("/web/me")
+async def web_me(request: Request):
+    token = request.cookies.get("access_token")
+    if not token:
+        raise HTTPException(status_code=401, detail={
+            "status": "error", "message": "Not authenticated"
+        })
+
+    from auth import JWT_SECRET, ALGORITHM
+    from jose import JWTError, jwt
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
+        user_id = payload.get("sub")
+    except JWTError:
+        raise HTTPException(status_code=401, detail={
+            "status": "error", "message": "Invalid or expired token"
+        })
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(status_code=401, detail={
+            "status": "error", "message": "User not found"
+        })
+
+    return {
+        "status": "success",
+        "data": {
+            "id": str(user.id),
+            "username": user.username,
+            "email": user.email,
+            "role": user.role,
+            "avatar_url": user.avatar_url,
         }
     }
