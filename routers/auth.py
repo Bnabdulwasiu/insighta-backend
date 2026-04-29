@@ -29,6 +29,18 @@ GITHUB_WEB_CLIENT_ID = os.getenv("GITHUB_WEB_CLIENT_ID")
 GITHUB_WEB_CLIENT_SECRET = os.getenv("GITHUB_WEB_CLIENT_SECRET")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
+WEB_COOKIE_SECURE = os.getenv("WEB_COOKIE_SECURE", "true").lower() == "true"
+WEB_COOKIE_SAMESITE = os.getenv("WEB_COOKIE_SAMESITE", "none")
+
+
+def _web_cookie_kwargs(max_age: int) -> dict:
+    return {
+        "httponly": True,
+        "secure": WEB_COOKIE_SECURE,
+        "samesite": WEB_COOKIE_SAMESITE,
+        "max_age": max_age,
+    }
+
 
 @router.get("/github")
 @limiter.limit("10/minute")
@@ -229,9 +241,7 @@ async def web_github_login(request: Request, response: Response):
     response.set_cookie(
         key="oauth_state",
         value=state,
-        httponly=True,
-        samesite="lax",
-        max_age=300  # 5 minutes
+        **_web_cookie_kwargs(max_age=300),
     )
     return response
 
@@ -304,16 +314,12 @@ async def web_github_callback(code: str, state: str, request: Request):
     response.set_cookie(
         key="access_token",
         value=access_token,
-        httponly=True,
-        samesite="lax",
-        max_age=180        # 3 minutes
+        **_web_cookie_kwargs(max_age=180),
     )
     response.set_cookie(
         key="refresh_token",
         value=refresh_token,
-        httponly=True,
-        samesite="lax",
-        max_age=300        # 5 minutes
+        **_web_cookie_kwargs(max_age=300),
     )
     response.delete_cookie("oauth_state")
     return response
@@ -365,9 +371,9 @@ async def web_refresh(request: Request):
 
     response = JSONResponse(content={"status": "success"})
     response.set_cookie(key="access_token", value=new_access,
-                        httponly=True, samesite="lax", max_age=180)
+                        **_web_cookie_kwargs(max_age=180))
     response.set_cookie(key="refresh_token", value=new_refresh,
-                        httponly=True, samesite="lax", max_age=300)
+                        **_web_cookie_kwargs(max_age=300))
     return response
 
 
