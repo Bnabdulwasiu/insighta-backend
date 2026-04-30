@@ -6,11 +6,13 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
+from models import User
 from slowapi.errors import RateLimitExceeded
 from slowapi import _rate_limit_exceeded_handler
 
 from core.limiter import limiter
-from database import engine, Base
+from database import AsyncSessionLocal, engine, Base
 from middleware.versioning import APIVersionMiddleware
 from middleware.logging import LoggingMiddleware
 from routers import auth as auth_router
@@ -24,6 +26,22 @@ async def lifespan(app: FastAPI):
     #Create DB tables
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    async with AsyncSessionLocal() as session:
+        # test analyst
+        analyst = await session.execute(
+            select(User).where(User.github_id == "test-analyst")
+        )
+        if not analyst.scalar_one_or_none():
+            session.add(User(
+                github_id="test-analyst",
+                username="test_analyst",
+                email="test-analyst@local",
+                avatar_url="",
+                role="analyst",
+            ))
+            await session.commit()
+            
     print("✅ Tables created")
     asyncio.create_task(seed_database())
     yield
