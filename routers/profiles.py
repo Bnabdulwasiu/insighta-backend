@@ -23,6 +23,24 @@ from utils import (
 
 router = APIRouter(prefix="/api", tags=["profiles"])
 
+@router.get("/users/me")
+@limiter.limit("60/minute")
+async def get_users_me(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    return {
+        "status": "success",
+        "data": {
+            "id": str(current_user.id),
+            "username": current_user.username,
+            "email": current_user.email,
+            "role": current_user.role,
+            "avatar_url": current_user.avatar_url,
+            "last_login_at": current_user.last_login_at.isoformat() if current_user.last_login_at else None,
+        }
+    }
+
 
 @router.post("/profiles", response_model=ProfileSchema, status_code=201)
 @limiter.limit("60/minute")
