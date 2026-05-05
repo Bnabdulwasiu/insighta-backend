@@ -5,7 +5,6 @@
 This document covers the three optimization areas required by Stage 4B:
 query performance, query normalization, and CSV data ingestion.
 All changes preserve the existing API contract. Stage 3 (auth, RBAC, CLI, web portal) remains intact.
-
 ---
 
 ## Part 1 — Query Performance
