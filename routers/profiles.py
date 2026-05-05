@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 import math
 from datetime import datetime as dt
 from typing import Optional
@@ -13,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 
 from auth import get_current_user, require_admin
 from core.limiter import limiter
+from core.cache import get_query_cache, set_query_cache, invalidate_query_cache
 from database import AsyncSessionLocal
 from models import Profile, User
 from schemas import CreateProfileRequest, ProfileListResponse, ProfileSchema
@@ -110,6 +112,9 @@ async def create_profile(
         try:
             await session.commit()
             await session.refresh(profile)
+            # A new profile was written — invalidate all cached query results
+            # so the next reader gets fresh data.
+            invalidate_query_cache()
             return JSONResponse(status_code=201, content={
                 "status": "success",
                 "data": profile_to_dict(profile)
@@ -227,6 +232,14 @@ async def search_profiles(
             "message": "Unable to interpret query"
         })
 
+    # ── Cache check ─────────────────────────────────────────────────
+    # Build a deterministic key from the parsed filters + pagination params.
+    # json.dumps with sort_keys ensures dict ordering never affects the key.
+    cache_key = f"search:{json.dumps(filters, sort_keys=True)}:p{page}:l{limit}"
+    cached = get_query_cache(cache_key)
+    if cached:
+        return cached
+
     async with AsyncSessionLocal() as session:
         query = select(Profile)
         if "gender" in filters:
@@ -251,7 +264,7 @@ async def search_profiles(
         result = await session.execute(query)
         profiles = result.scalars().all()
 
-    return {
+    response_data = {
         "status": "success",
         "page": page,
         "limit": limit,
@@ -264,6 +277,8 @@ async def search_profiles(
         },
         "data": [profile_to_dict(p) for p in profiles]
     }
+    set_query_cache(cache_key, response_data)
+    return response_data
 
 
 @router.get("/profiles", response_model=ProfileListResponse)
@@ -293,6 +308,17 @@ async def get_all_profiles(
             "status": "error",
             "message": f"sort_by must be one of: {', '.join(SORTABLE_FIELDS)}"
         })
+
+    # ── Cache check ─────────────────────────────────────────────────
+    cache_key = (
+        f"list:g={gender}:c={country_id}:ag={age_group}"
+        f":mna={min_age}:mxa={max_age}:mgp={min_gender_probability}"
+        f":mcp={min_country_probability}:sb={sort_by}:o={order}"
+        f":p={page}:l={limit}"
+    )
+    cached = get_query_cache(cache_key)
+    if cached:
+        return cached
 
     async with AsyncSessionLocal() as session:
         query = select(Profile)
@@ -326,7 +352,7 @@ async def get_all_profiles(
         result = await session.execute(query)
         profiles = result.scalars().all()
 
-    return {
+    response_data = {
         "status": "success",
         "page": page,
         "limit": limit,
@@ -339,6 +365,8 @@ async def get_all_profiles(
         },
         "data": [profile_to_dict(p) for p in profiles]
     }
+    set_query_cache(cache_key, response_data)
+    return response_data
 
 
 @router.get("/profiles/{profile_id}")
@@ -390,4 +418,6 @@ async def delete_profile(
             })
         await session.delete(profile)
         await session.commit()
+        # Profile deleted — clear cached results so readers don't see stale counts
+        invalidate_query_cache()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

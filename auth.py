@@ -7,6 +7,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import select
 from database import AsyncSessionLocal
 from models import User, RefreshToken
+from core.cache import get_user_cache, set_user_cache
 import secrets
 
 JWT_SECRET = os.getenv("JWT_SECRET", "changeme")
@@ -76,6 +77,14 @@ async def get_current_user(
             "message": "Invalid or expired token"
         })
 
+    # ── Cache check ───────────────────────────────────────────────────────────
+    # The user row is fetched only to confirm is_active and get the full object.
+    # It changes very rarely, so we cache it for 5 minutes to avoid a DB
+    # round-trip on every single authenticated request.
+    cached = get_user_cache(user_id)
+    if cached:
+        return cached
+
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(User).where(User.id == user_id))
         user = result.scalar_one_or_none()
@@ -90,6 +99,9 @@ async def get_current_user(
             "status": "error",
             "message": "Account is deactivated"
         })
+
+    # Populate cache for subsequent requests
+    set_user_cache(user_id, user)
     return user
 
 
