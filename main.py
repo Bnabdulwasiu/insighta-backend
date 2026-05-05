@@ -24,7 +24,7 @@ async def lifespan(app: FastAPI):
     #Create DB tables
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    print("✅ Tables created")
+    print("[OK] Tables created")
     asyncio.create_task(seed_database())
     yield
 

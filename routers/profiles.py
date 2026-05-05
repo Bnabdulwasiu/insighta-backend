@@ -1,14 +1,16 @@
 import csv
 import io
 import math
-from datetime import datetime as dt
+from datetime import datetime as dt, timezone
 from typing import Optional
 import asyncio
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+import uuid6
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import select, func
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
 from auth import get_current_user, require_admin
@@ -404,3 +406,171 @@ async def delete_profile(
         # Profile deleted — clear cached results so readers don't see stale counts
         invalidate_query_cache()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ── CSV upload constants ───────────────────────────────────────────────────────
+_CHUNK_SIZE   = 1000                    # rows per batch INSERT
+_VALID_GENDERS = {"male", "female"}    # only values the DB stores
+
+
+@router.post("/profiles/upload")
+@limiter.limit("10/minute")
+async def upload_profiles_csv(
+    request: Request,
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_admin),
+):
+    """
+    Upload a pre-enriched CSV of profiles (admin only).
+
+    Expected CSV columns:
+      Required: name, gender, age, country_id
+      Optional: gender_probability, country_probability
+
+    Processing guarantees:
+      - File is never fully loaded into memory (row-by-row streaming)
+      - Bad rows are skipped individually — one bad row never fails the upload
+      - Rows are inserted in batches of 1000 via ON CONFLICT DO NOTHING
+      - Chunks already committed are NOT rolled back if a later error occurs
+      - Event loop is yielded between chunks — concurrent reads stay fast
+    """
+    if not (file.filename or "").lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail={
+            "status": "error",
+            "message": "Only .csv files are supported"
+        })
+
+    total_rows = 0
+    inserted   = 0
+    reasons: dict = {}
+
+    def _skip(reason: str, count: int = 1) -> None:
+        """Record a skip reason."""
+        reasons[reason] = reasons.get(reason, 0) + count
+
+    # ── Stream setup ──────────────────────────────────────────────────────────
+    # UploadFile.file is a SpooledTemporaryFile — the full multipart body is
+    # already received before this handler runs, so seek + iterate is safe.
+    # TextIOWrapper lets csv.DictReader walk it line-by-line without buffering
+    # the whole file in Python memory.
+    try:
+        file.file.seek(0)
+        text_stream = io.TextIOWrapper(file.file, encoding="utf-8", errors="replace")
+        reader = csv.DictReader(text_stream)
+    except Exception:
+        raise HTTPException(status_code=400, detail={
+            "status": "error",
+            "message": "Could not read the uploaded file"
+        })
+
+    chunk: list[dict] = []
+
+    async def flush_chunk() -> None:
+        """
+        Batch-insert the current chunk and clear it.
+
+        Uses INSERT ... ON CONFLICT DO NOTHING so duplicate names are silently
+        skipped. rowcount tells us how many rows were actually written vs
+        rejected — the difference is counted as duplicate_name skips.
+
+        asyncio.sleep(0) at the end yields the event loop so concurrent query
+        requests can be served between chunk writes.
+        """
+        nonlocal inserted
+        if not chunk:
+            return
+
+        async with AsyncSessionLocal() as session:
+            stmt = pg_insert(Profile).values(chunk)
+            stmt = stmt.on_conflict_do_nothing(index_elements=["name"])
+            result = await session.execute(stmt)
+            await session.commit()
+
+            actually_inserted = result.rowcount
+            # Rows attempted but not written = names already in DB
+            dupes = len(chunk) - actually_inserted
+            if dupes > 0:
+                _skip("duplicate_name", dupes)
+            inserted += actually_inserted
+
+        chunk.clear()
+        # Yield the event loop — lets read requests execute between chunks
+        await asyncio.sleep(0)
+
+    # ── Row-by-row processing ─────────────────────────────────────────────────
+    for row in reader:
+        total_rows += 1
+
+        # Malformed row: DictReader sets None key when column count is wrong
+        if row is None or None in row:
+            _skip("malformed_row")
+            continue
+
+        # ── Required field presence ───────────────────────────────────────────
+        name       = (row.get("name")       or "").strip().lower()
+        gender     = (row.get("gender")     or "").strip().lower()
+        age_raw    = (row.get("age")        or "").strip()
+        country_id = (row.get("country_id") or "").strip().upper()
+
+        if not name or not gender or not age_raw or not country_id:
+            _skip("missing_fields")
+            continue
+
+        # ── Field value validation ────────────────────────────────────────────
+        if gender not in _VALID_GENDERS:
+            _skip("invalid_gender")
+            continue
+
+        try:
+            age = int(age_raw)
+            if age <= 0:
+                raise ValueError("age must be positive")
+        except ValueError:
+            _skip("invalid_age")
+            continue
+
+        # ── Optional numeric fields ───────────────────────────────────────────
+        try:
+            gp = float(row.get("gender_probability") or 0) or None
+        except (ValueError, TypeError):
+            gp = None
+
+        try:
+            cp = float(row.get("country_probability") or 0) or None
+        except (ValueError, TypeError):
+            cp = None
+
+        # ── Build row dict ────────────────────────────────────────────────────
+        # id and created_at must be supplied explicitly — Python-side column
+        # defaults are not applied by the bulk INSERT statement.
+        chunk.append({
+            "id":                  uuid6.uuid7(),
+            "name":                name,
+            "gender":              gender,
+            "gender_probability":  gp,
+            "age":                 age,
+            "age_group":           get_age_group(age),
+            "country_id":          country_id,
+            "country_name":        get_country_name(country_id),
+            "country_probability": cp,
+            "created_at":          dt.now(timezone.utc),
+        })
+
+        # Flush when the chunk is full
+        if len(chunk) >= _CHUNK_SIZE:
+            await flush_chunk()
+
+    # Flush whatever is left in the final partial chunk
+    await flush_chunk()
+
+    # New rows were written — stale cached results must not be served
+    invalidate_query_cache()
+
+    skipped = total_rows - inserted
+    return {
+        "status":     "success",
+        "total_rows": total_rows,
+        "inserted":   inserted,
+        "skipped":    skipped,
+        "reasons":    reasons,
+    }
