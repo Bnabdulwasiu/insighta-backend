@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):
             ))
             await session.commit()
             
-    print("✅ Tables created")
+    print("[OK] Tables created")
     asyncio.create_task(seed_database())
     yield
 
