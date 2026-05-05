@@ -74,6 +74,30 @@ async def seed_database():
         await session.commit()
 
 
+# All filter keys the system can ever produce, in fixed alphabetical order.
+# Adding a key here automatically includes it in every cache key.
+_CANONICAL_KEYS = ["age_group", "country_id", "gender", "max_age", "min_age"]
+
+
+def normalize_filters(filters: dict) -> str:
+    """
+    Example:
+        {"gender": "male", "country_id": "NG", "min_age": 16, "max_age": 24}
+        → "age_group=None:country_id=ng:gender=male:max_age=24:min_age=16"
+
+    Rules:
+      - String values are lowercased and stripped
+      - Missing keys contribute "key=None" so the string length is constant
+    """
+    parts = []
+    for key in _CANONICAL_KEYS:
+        val = filters.get(key)
+        if isinstance(val, str):
+            val = val.strip().lower()
+        parts.append(f"{key}={val}")
+    return ":".join(parts)
+
+
 def parse_query(q: str) -> dict:
     filters = {}
     text = q.lower().strip()
