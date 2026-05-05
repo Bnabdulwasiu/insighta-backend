@@ -6,6 +6,7 @@ import json
 from sqlalchemy.dialects.postgresql import insert
 import re
 import uuid
+import functools
 
 #Helper functions
 def error_response(status_code: int, message: str):
@@ -18,6 +19,7 @@ def error_response(status_code: int, message: str):
      )
 
 
+@functools.lru_cache(maxsize=None)
 def get_age_group(age: int | None) -> str | None:
     if age is None:
         return None
@@ -46,6 +48,7 @@ def profile_to_dict(profile: Profile) -> dict:
     }
 
 
+@functools.lru_cache(maxsize=None)
 def get_country_name(country_id: str) -> str:
     """
     Resolves a 2-letter ISO country code to its full name.
@@ -101,13 +104,15 @@ def normalize_filters(filters: dict) -> str:
 def parse_query(q: str) -> dict:
     filters = {}
     text = q.lower().strip()
+    # Replace common range separators with " to " so they survive punctuation stripping
+    text = re.sub(r"(\d+)\s*[-–]\s*(\d+)", r"\1 to \2", text)
     # Remove punctuation except spaces
     text = re.sub(r"[^\w\s]", "", text)
     tokens = text.split()
 
     # ── 1. GENDER ────────────────────────────────────────────────
-    MALE_WORDS   = {"male", "males", "man", "men", "boy", "boys"}
-    FEMALE_WORDS = {"female", "females", "woman", "women", "girl", "girls"}
+    MALE_WORDS   = {"male", "males", "man", "men", "boy", "boys", "guy", "guys", "gentleman", "gentlemen"}
+    FEMALE_WORDS = {"female", "females", "woman", "women", "girl", "girls", "lady", "ladies"}
 
     has_male   = bool(MALE_WORDS & set(tokens))
     has_female = bool(FEMALE_WORDS & set(tokens))
@@ -145,7 +150,7 @@ def parse_query(q: str) -> dict:
 
     # ── 3. EXPLICIT AGE via regex ─────────────────────────────────
     patterns = [
-        (r"between\s+(\d+)\s+and\s+(\d+)",  "between"),
+        (r"(?:between|aged|from)?\s*(?:ages\s+)?(\d+)\s+(?:and|to)\s+(\d+)",  "between"),
         (r"(?:above|over|older than)\s+(\d+)",   "min"),
         (r"(?:below|under|younger than)\s+(\d+)", "max"),
     ]
@@ -195,6 +200,22 @@ def parse_query(q: str) -> dict:
                 break
             except LookupError:
                 pass
+            
+            # Demonym heuristic: strip 'n' or 'an' (e.g. nigerian -> nigeria)
+            if token.endswith("n"):
+                try:
+                    country = pycountry.countries.lookup(token[:-1])
+                    country_id = country.alpha_2
+                    break
+                except LookupError:
+                    pass
+            if token.endswith("an"):
+                try:
+                    country = pycountry.countries.lookup(token[:-2])
+                    country_id = country.alpha_2
+                    break
+                except LookupError:
+                    pass
 
     if country_id:
         filters["country_id"] = country_id

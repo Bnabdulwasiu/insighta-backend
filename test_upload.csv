@@ -1,0 +1,11 @@
+name,gender,age,country_id,gender_probability,country_probability
+emeka,male,27,NG,0.98,0.87
+amina,female,22,NG,0.97,0.91
+kwame,male,34,GH,0.95,0.82
+,,25,NG,,
+invalid_person,unknown,20,NG,,
+badage,male,-5,NG,,
+nokountry,female,30,ZZ,,
+chidi,male,31,NG,0.94,0.88
+fatima,female,19,NG,0.99,0.93
+emeka,male,27,NG,,
