@@ -20,7 +20,7 @@ class Profile(Base):
 
     __table_args__ = (
         # Composite index: covers queries filtering on both gender AND country together
-        Index("ix_profiles_gender_country_age", "gender", "country_id", "age")
+        Index("ix_profiles_gender_country_age", "gender", "country_id", "age"),
     )
 
 

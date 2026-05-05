@@ -1,6 +1,5 @@
 import csv
 import io
-import json
 import math
 from datetime import datetime as dt
 from typing import Optional
@@ -20,7 +19,7 @@ from models import Profile, User
 from schemas import CreateProfileRequest, ProfileListResponse, ProfileSchema
 from utils import (
     build_url, get_age_group, get_country_name,
-    is_valid_uuid, parse_query, profile_to_dict
+    is_valid_uuid, parse_query, profile_to_dict, normalize_filters
 )
 
 router = APIRouter(prefix="/api", tags=["profiles"])
@@ -215,9 +214,11 @@ async def search_profiles(
         })
 
     # ── Cache check ─────────────────────────────────────────────────
-    # Build a deterministic key from the parsed filters + pagination params.
-    # json.dumps with sort_keys ensures dict ordering never affects the key.
-    cache_key = f"search:{json.dumps(filters, sort_keys=True)}:p{page}:l{limit}"
+    # normalize_filters() produces a canonical string from the parsed filters.
+    # Example: "young ladies from nigeria" == "females aged 16-24 in Nigeria"
+    #   both parse to {gender:female, min_age:16, max_age:24, country_id:NG}
+    #   both normalise to "age_group=None:country_id=ng:gender=female:max_age=24:min_age=16"
+    cache_key = f"search:{normalize_filters(filters)}:p{page}:l{limit}"
     cached = get_query_cache(cache_key)
     if cached:
         return cached
