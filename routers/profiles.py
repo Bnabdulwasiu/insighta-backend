@@ -23,6 +23,7 @@ from utils import (
     build_url, get_age_group, get_country_name,
     is_valid_uuid, parse_query, profile_to_dict, normalize_filters
 )
+from core.cache import _query_cache
 
 router = APIRouter(prefix="/api", tags=["profiles"])
 
@@ -235,9 +236,6 @@ async def search_profiles(
 
     # ── Cache check ─────────────────────────────────────────────────
     # normalize_filters() produces a canonical string from the parsed filters.
-    # Example: "young ladies from nigeria" == "females aged 16-24 in Nigeria"
-    #   both parse to {gender:female, min_age:16, max_age:24, country_id:NG}
-    #   both normalise to "age_group=None:country_id=ng:gender=female:max_age=24:min_age=16"
     cache_key = f"search:{normalize_filters(filters)}:p{page}:l{limit}"
     cached = get_query_cache(cache_key)
     if cached:
@@ -427,7 +425,7 @@ async def delete_profile(
 
 
 # ── CSV upload constants ───────────────────────────────────────────────────────
-_CHUNK_SIZE   = 1000                    # rows per batch INSERT
+_CHUNK_SIZE   = 1000                   # rows per batch INSERT (1000 * 10 cols = 10,000 params, under PG's 65535 limit)
 _VALID_GENDERS = {"male", "female"}    # only values the DB stores
 
 
@@ -472,13 +470,16 @@ async def upload_profiles_csv(
     # TextIOWrapper lets csv.DictReader walk it line-by-line without buffering
     # the whole file in Python memory.
     try:
+        import codecs
         file.file.seek(0)
-        text_stream = io.TextIOWrapper(file.file, encoding="utf-8", errors="replace")
+        text_stream = codecs.iterdecode(file.file, "utf-8", errors="replace")
         reader = csv.DictReader(text_stream)
-    except Exception:
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=400, detail={
             "status": "error",
-            "message": "Could not read the uploaded file"
+            "message": f"Could not read the uploaded file: {str(e)}"
         })
 
     chunk: list[dict] = []
@@ -591,4 +592,14 @@ async def upload_profiles_csv(
         "inserted":   inserted,
         "skipped":    skipped,
         "reasons":    reasons,
+    }
+
+
+
+@router.get("/debug/cache")
+async def view_cache_keys():
+    # Only for local debugging: returns all active keys currently in the cache
+    return {
+        "count": len(_query_cache),
+        "keys": list(_query_cache.keys())
     }
