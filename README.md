@@ -111,207 +111,66 @@ to extract filters.
 | Age group | `child`, `children` | `age_group=child` |
 | Age group | `teenager`, `teen`, `teens`, `teenagers` | `age_group=teenager` |
 | Age group | `adult`, `adults` | `age_group=adult` |
-| Age group | `senior`, `seniors`, `elderly` | `age_group=senior` |
-| Special | `young`, `youth` | `min_age=16, max_age=24` |
-| Explicit age | `above 30`, `over 30`, `older than 30` | `min_age=30` |
-| Explicit age | `below 25`, `under 25`, `younger than 25` | `max_age=25` |
-| Explicit age | `between 20 and 35` | `min_age=20, max_age=35` |
-| Country | `from nigeria`, `in kenya`, `of ghana` | resolved via pycountry |
+| Age group | `senior`, `seniors`, `elderly`, `old` | `age_group=senior` |
+| Age range | `under 30`, `older than 25`, `between 20 and 40` | `min_age` / `max_age` |
+| Country | Any country name or demonym (`Nigerian`, `Nigeria`, `NG`) | `country_id=NG` |
 
-### Logic Order
-1. Normalize input — lowercase, strip punctuation
-2. Detect gender — keyword scan, both present = no gender filter
-3. Detect age group — keyword scan, age_group wins over `young`
-4. Detect explicit age — regex patterns, first match wins
-5. Detect country — trigger word strategy first, token scan fallback
+### Age Group Boundaries
 
-### Examples
-```
-"young males from nigeria"       → gender=male, min_age=16, max_age=24, country_id=NG
-"adult females from kenya"       → gender=female, age_group=adult, country_id=KE
-"seniors above 65"               → age_group=senior, min_age=65
-"male and female teenagers"      → age_group=teenager (no gender)
-"people from south africa"       → country_id=ZA
-"women below 30 in japan"        → gender=female, max_age=30, country_id=JP
-```
+Computed by `get_age_group()` in `utils.py`:
 
-### Limitations
-- No negation support — `"not from nigeria"` is ignored
-- No ISO code matching — use full country names, not `"NG"`
-- No spelling correction — `"nigerria"` will not resolve
-- Only first age pattern matched per query
-- `"young"` + explicit age can produce conflicting range
-- Multi-word countries need trigger word — `"from south africa"` works, `"south africa males"` may not
-- No support for multiple countries in one query
-
----
-
-## API Reference
-
-Base URL: `https://profile-app-5343e495.fastapicloud.dev`
-
-All `/api/*` requests require:
-```
-Authorization: Bearer <access_token>
-X-API-Version: 1
-```
-
-### Profile Endpoints
-
-| Method | Endpoint | Role | Description |
-|---|---|---|---|
-| POST | /api/profiles | admin | Create profile |
-| GET | /api/profiles | analyst | List with filters + pagination |
-| GET | /api/profiles/search | analyst | Natural language search |
-| GET | /api/profiles/export | analyst | Export CSV |
-| GET | /api/profiles/parse | analyst | Debug query parser |
-| GET | /api/profiles/{id} | analyst | Get single profile |
-| DELETE | /api/profiles/{id} | admin | Delete profile |
-
-### Filtering (GET /api/profiles)
-
-| Param | Type | Example |
-|---|---|---|
-| gender | string | `male` or `female` |
-| age_group | string | `child`, `teenager`, `adult`, `senior` |
-| country_id | string | `NG`, `KE`, `US` |
-| min_age | int | `25` |
-| max_age | int | `40` |
-| min_gender_probability | float | `0.8` |
-| min_country_probability | float | `0.7` |
-| sort_by | string | `age`, `created_at`, `gender_probability` |
-| order | string | `asc` or `desc` |
-| page | int | `1` |
-| limit | int | `10` (max 50) |
-
-### Pagination Response Format
-```json
-{
-  "status": "success",
-  "page": 1,
-  "limit": 10,
-  "total": 2026,
-  "total_pages": 203,
-  "links": {
-    "self": "/api/profiles?page=1&limit=10",
-    "next": "/api/profiles?page=2&limit=10",
-    "prev": null
-  },
-  "data": []
-}
-```
-
-### Auth Endpoints
-
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | /auth/github | CLI OAuth start |
-| GET | /auth/github/callback | CLI OAuth callback |
-| POST | /auth/refresh | Refresh tokens (CLI) |
-| POST | /auth/logout | Logout (CLI) |
-| GET | /auth/me | Current user (CLI) |
-| GET | /auth/web/github | Web OAuth start |
-| GET | /auth/web/github/callback | Web OAuth callback |
-| POST | /auth/web/refresh | Refresh tokens (Web) |
-| POST | /auth/web/logout | Logout (Web) |
-| GET | /auth/web/me | Current user (Web) |
-
----
-
-## Error Responses
-
-All errors follow this structure:
-```json
-{ "status": "error", "message": "<error message>" }
-```
-
-| Status | Meaning |
+| Age | Group |
 |---|---|
-| 400 | Missing or invalid parameter |
-| 401 | Invalid or expired token |
-| 403 | Insufficient permissions or inactive account |
-| 404 | Profile not found |
-| 422 | Invalid parameter type |
-| 429 | Rate limit exceeded |
-| 502 | Upstream API failure |
-| 500 | Internal server error |
+| 0 – 12 | `child` |
+| 13 – 19 | `teenager` |
+| 20 – 59 | `adult` |
+| 60 + | `senior` |
 
----
+### Country Resolution
 
-## Rate Limiting
+Country names and demonyms are resolved to ISO 3166-1 alpha-2 codes using
+`pycountry`. The resolver is wrapped with `@functools.lru_cache` so repeated
+lookups for the same country name cost nothing after the first call.
 
-| Scope | Limit |
+```python
+get_country_name("NG")   # → "Nigeria"
+get_country_name("US")   # → "United States"
+```
+
+### Example Queries
+
+| Plain English | Parsed Filters |
 |---|---|
-| `/auth/*` endpoints | 10 requests/minute |
-| All other endpoints | 60 requests/minute |
-
-Returns `429 Too Many Requests` when exceeded.
+| `"young males in Nigeria"` | `gender=male, age_group=teenager, country_id=NG` |
+| `"adult women from the US"` | `gender=female, age_group=adult, country_id=US` |
+| `"seniors older than 65"` | `age_group=senior, min_age=65` |
 
 ---
 
-## Local Development
+## Local Setup
+
+### Requirements
+- Python 3.10+
+- PostgreSQL
+
+### Install
 
 ```bash
-git clone https://github.com/Bnabdulwasiu/insighta-backend.git
-cd insighta-backend
-python -m venv venv
-source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env       # fill in your values
+```
+
+### Environment Variables
+
+Copy `.env.example` to `.env` and fill in your values:
+
+```bash
+cp .env.example .env
+```
+
+### Run
+
+```bash
 uvicorn main:app --reload
 ```
 
----
-
-## Environment Variables
-
-```env
-DB_USER=
-DB_PASSWORD=
-DB_HOST=
-DB_PORT=
-DB_NAME=
-GITHUB_CLIENT_ID=
-GITHUB_CLIENT_SECRET=
-GITHUB_WEB_CLIENT_ID=
-GITHUB_WEB_CLIENT_SECRET=
-JWT_SECRET=
-FRONTEND_URL=
-```
-
----
-
-## Project Structure
-
-```
-insighta-backend/
-├── main.py              # app setup, middleware, exception handlers
-├── auth.py              # JWT utilities, auth dependencies
-├── database.py          # async engine, session factory
-├── models.py            # SQLAlchemy models (Profile, User, RefreshToken)
-├── schemas.py           # Pydantic request/response schemas
-├── utils.py             # helpers, NLP parser, profile_to_dict
-├── core/
-│   └── limiter.py       # slowapi rate limiter instance
-├── middleware/
-│   ├── versioning.py    # X-API-Version header enforcement
-│   └── logging.py       # per-request method/path/status/time logging
-├── routers/
-│   ├── auth.py          # /auth/* endpoints (CLI + Web)
-│   └── profiles.py      # /api/profiles/* endpoints
-└── tests/
-    └── test_health.py
-```
-
----
-
-## CI/CD
-
-GitHub Actions runs on every PR to `main`:
-- Ruff linting
-- Pytest tests
-- PostgreSQL service container
-
-Branch protection on `main` requires:
-- PR review before merge
-- CI checks to pass
+API docs available at: http://localhost:8000/docs
